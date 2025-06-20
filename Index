@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Music Composer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .keyboard { display: flex; }
+        .key { width: 40px; height: 150px; border: 1px solid #000; margin: 2px; cursor: pointer; }
+        .key.white { background: #fff; }
+        .key.black { background: #000; width: 30px; height: 100px; margin-left: -15px; margin-right: -15px; position: relative; z-index: 1; }
+        .key.active { background: #aaf; }
+        .sequencer { display: grid; grid-template-columns: repeat(16, 30px); gap: 2px; margin-top: 20px; }
+        .beat { width: 30px; height: 30px; border: 1px solid #ccc; cursor: pointer; }
+        .beat.active { background: #4caf50; }
+        .control-panel { margin-top: 20px; }
+        .instrument-row { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+        canvas { margin-top: 20px; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+    <h1>Interactive Music Composer</h1>
+    <div class="control-panel">
+        <label>Tempo: <input type="range" id="tempoSlider" min="60" max="180" value="120"></label>
+        <span id="tempoValue">120 BPM</span>
+        <button id="playBtn">Play</button>
+        <button id="stopBtn">Stop</button>
+        <button id="recordBtn">Record</button>
+        <button id="playRecordingBtn">Play Recording</button>
+        <label>Bass: <input type="range" id="bassSlider" min="-12" max="12" value="0"></label>
+        <label>Treble: <input type="range" id="trebleSlider" min="-12" max="12" value="0"></label>
+    </div>
+    <h2>Virtual Keyboard</h2>
+    <select id="instrumentSelect">
+        <option value="piano">Piano</option>
+        <option value="guitar">Guitar</option>
+        <option value="violin">Violin</option>
+        <option value="flute">Flute</option>
+        <option value="drums">Drums</option>
+        <option value="saxophone">Saxophone</option>
+        <option value="trumpet">Trumpet</option>
+        <option value="cello">Cello</option>
+        <option value="harp">Harp</option>
+        <option value="organ">Organ</option>
+        <option value="synth">Synth</option>
+    </select>
+    <div class="keyboard" id="keyboard"></div>
+    <h2>Sequencer</h2>
+    <div id="sequencer"></div>
+    <canvas id="visualization" width="480" height="100"></canvas>
+    <script>
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const keys = ['C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4'];
+        const instrumentConfigs = {
+            piano: { type: 'sine', gain: 0.5 },
+            guitar: { type: 'triangle', gain: 0.4 },
+            violin: { type: 'sawtooth', gain: 0.3 },
+            flute: { type: 'sine', gain: 0.6 },
+            drums: { type: 'square', gain: 0.8, duration: 0.1 },
+            saxophone: { type: 'square', gain: 0.5 },
+            trumpet: { type: 'sawtooth', gain: 0.5 },
+            cello: { type: 'triangle', gain: 0.3 },
+            harp: { type: 'sine', gain: 0.4 },
+            organ: { type: 'sine', gain: 0.5 },
+            synth: { type: 'sawtooth', gain: 0.6 }
+        };
+        let isPlaying = false;
+        let recording = false;
+        let recordedNotes = [];
+        let startTime;
+        let currentSequence = [];
+        let timeoutIds = [];
+
+        // Audio nodes for bass and treble
+        const bassFilter = audioContext.createBiquadFilter();
+        const trebleFilter = audioContext.createBiquadFilter();
+        bassFilter.type = 'lowshelf';
+        bassFilter.frequency.value = 200;
+        trebleFilter.type = 'highshelf';
+        trebleFilter.frequency.value = 2000;
+
+        // Correct audio graph setup: bassFilter -> trebleFilter -> destination
+        bassFilter.connect(trebleFilter);
+        trebleFilter.connect(audioContext.destination);
+
+        // UI Elements
+        const keyboardDiv = document.getElementById('keyboard');
+        const sequencerDiv = document.getElementById('sequencer');
+        const tempoSlider = document.getElementById('tempoSlider');
+        const tempoValue = document.getElementById('tempoValue');
+        const playBtn = document.getElementById('playBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const recordBtn = document.getElementById('recordBtn');
+        const playRecordingBtn = document.getElementById('playRecordingBtn');
+        const instrumentSelect = document.getElementById('instrumentSelect');
+        const bassSlider = document.getElementById('bassSlider');
+        const trebleSlider = document.getElementById('trebleSlider');
+        const canvas = document.getElementById('visualization');
+        const ctx = canvas.getContext('2d');
+
+        // Create Keyboard
+        keys.forEach((note, i) => {
+            const key = document.createElement('div');
+            key.classList.add('key', note.includes('#') ? 'black' : 'white');
+            key.dataset.note = note;
+            key.addEventListener('mousedown', () => playNote(note));
+            keyboardDiv.appendChild(key);
+        });
+
+        // Create Sequencer
+        Object.keys(instrumentConfigs).forEach(instrument => {
+            const row = document.createElement('div');
+            row.classList.add('instrument-row');
+            row.innerHTML = `<label>${instrument}</label><input type="range" class="volume" min="0" max="1" value="0.5" step="0.1"><button class="mute">Mute</button><button class="solo">Solo</button>`;
+            const beats = document.createElement('div');
+            beats.classList.add('sequencer');
+            for (let i = 0; i < 16; i++) {
+                const beat = document.createElement('div');
+                beat.classList.add('beat');
+                beat.dataset.instrument = instrument;
+                beat.dataset.beat = i;
+                beat.addEventListener('click', () => {
+                    beat.classList.toggle('active');
+                    updateSequence();
+                });
+                beats.appendChild(beat);
+            }
+            row.appendChild(beats);
+            sequencerDiv.appendChild(row);
+        });
+
+        function playNote(note, instrument = instrumentSelect.value, duration = 0.5) {
+            const config = instrumentConfigs[instrument];
+            const osc = audioContext.createOscillator();
+            const noteGain = audioContext.createGain();
+            osc.type = config.type;
+            osc.frequency.value = noteToFrequency(note);
+            noteGain.gain.value = config.gain * getVolume(instrument);
+            osc.connect(noteGain).connect(bassFilter);
+            osc.start(audioContext.currentTime);
+            osc.stop(audioContext.currentTime + (config.duration || duration));
+            if (recording) {
+                recordedNotes.push({ time: audioContext.currentTime - startTime, note, instrument });
+            }
+            visualize(note);
+        }
+
+        function noteToFrequency(note) {
+            const notes = { 'C4': 261.63, 'C#4': 277.18, 'D4': 293.66, 'D#4': 311.13, 'E4': 329.63, 'F4': 349.23, 'F#4': 369.99, 'G4': 392.00, 'G#4': 415.30, 'A4': 440.00, 'A#4': 466.16, 'B4': 493.88 };
+            return notes[note];
+        }
+
+        function updateSequence() {
+            currentSequence = [];
+            document.querySelectorAll('.beat.active').forEach(beat => {
+                currentSequence.push({ instrument: beat.dataset.instrument, beat: parseInt(beat.dataset.beat) });
+            });
+        }
+
+        function playSequence() {
+            if (!isPlaying) return;
+            const tempo = parseInt(tempoSlider.value);
+            const beatDuration = 60 / tempo / 4;
+            const now = audioContext.currentTime;
+            currentSequence.forEach(({ instrument, beat }) => {
+                const time = now + beat * beatDuration;
+                const osc = audioContext.createOscillator();
+                const noteGain = audioContext.createGain();
+                osc.type = instrumentConfigs[instrument].type;
+                osc.frequency.value = noteToFrequency(keys[beat % keys.length]);
+                noteGain.gain.value = instrumentConfigs[instrument].gain * getVolume(instrument);
+                osc.connect(noteGain).connect(bassFilter);
+                osc.start(time);
+                osc.stop(time + (instrumentConfigs[instrument].duration || 0.5));
+            });
+            timeoutIds.push(setTimeout(() => { if (isPlaying) playSequence(); }, beatDuration * 16 * 1000));
+        }
+
+        function playRecording() {
+            recordedNotes.forEach(({ time, note, instrument }) => {
+                const osc = audioContext.createOscillator();
+                const noteGain = audioContext.createGain();
+                osc.type = instrumentConfigs[instrument].type;
+                osc.frequency.value = noteToFrequency(note);
+                noteGain.gain.value = instrumentConfigs[instrument].gain;
+                osc.connect(noteGain).connect(bassFilter);
+                osc.start(audioContext.currentTime + time);
+                osc.stop(audioContext.currentTime + time + (instrumentConfigs[instrument].duration || 0.5));
+            });
+        }
+
+        function stopPlayback() {
+            isPlaying = false;
+            timeoutIds.forEach(clearTimeout);
+            timeoutIds = [];
+        }
+
+        function getVolume(instrument) {
+            const slider = document.querySelector(`.instrument-row:has([data-instrument="${instrument}"]) .volume`);
+            return slider ? parseFloat(slider.value) : 0.5;
+        }
+
+        function visualize(note) {
+            const index = keys.indexOf(note);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#4caf50';
+            ctx.fillRect(index * 40, 0, 38, 100);
+        }
+
+        // Event Listeners
+        tempoSlider.addEventListener('input', () => {
+            tempoValue.textContent = `${tempoSlider.value} BPM`;
+            if (isPlaying) {
+                stopPlayback();
+                isPlaying = true;
+                playSequence();
+            }
+        });
+
+        playBtn.addEventListener('click', () => {
+            if (!isPlaying) {
+                isPlaying = true;
+                playSequence();
+            }
+        });
+
+        stopBtn.addEventListener('click', stopPlayback);
+
+        recordBtn.addEventListener('click', () => {
+            recording = !recording;
+            recordBtn.textContent = recording ? 'Stop Recording' : 'Record';
+            if (recording) {
+                recordedNotes = [];
+                startTime = audioContext.currentTime;
+            }
+        });
+
+        playRecordingBtn.addEventListener('click', playRecording);
+
+        bassSlider.addEventListener('input', () => {
+            bassFilter.gain.value = parseInt(bassSlider.value);
+        });
+
+        trebleSlider.addEventListener('input', () => {
+            trebleFilter.gain.value = parseInt(trebleSlider.value);
+        });
+
+        document.querySelectorAll('.mute').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const row = e.target.closest('.instrument-row');
+                const slider = row.querySelector('.volume');
+                slider.value = slider.value === '0' ? '0.5' : '0';
+            });
+        });
+
+        document.querySelectorAll('.solo').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const row = e.target.closest('.instrument-row');
+                document.querySelectorAll('.volume').forEach(slider => slider.value = '0');
+                row.querySelector('.volume').value = '0.5';
+            });
+        });
+    </script>
+</body>
+</html>
